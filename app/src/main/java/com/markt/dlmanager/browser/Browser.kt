@@ -195,6 +195,7 @@ class Browser(val context: Context) {
         private var done = false
         private val handler = Handler(Looper.getMainLooper())
         private val timeout = Runnable { finish() }
+        private val openerSite = Shields.site(opener.url)
 
         init {
             webView.settings.apply {
@@ -214,7 +215,7 @@ class Browser(val context: Context) {
                 }
 
                 override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
-                    if (done || (BrowserPrefs.blockAdHosts && Shields.isAdHost(request.url.host))) Shields.emptyResponse() else null
+                    if (done || (BrowserPrefs.blockAdsOn(openerSite) && Shields.isAdHost(request.url.host))) Shields.emptyResponse() else null
             }
             webView.webChromeClient = WebChromeClient()
             webView.setDownloadListener { dlUrl, ua, contentDisposition, mimeType, length ->
@@ -246,7 +247,7 @@ class Browser(val context: Context) {
             when {
                 scheme == "about" -> return true
                 scheme != "http" && scheme != "https" -> block(null)          // other apps, data:, javascript:
-                BrowserPrefs.blockAdHosts && Shields.isAdHost(uri.host) -> block(null)
+                BrowserPrefs.blockAdsOn(openerSite) && Shields.isAdHost(uri.host) -> block(null)
                 Shields.looksLikeFile(url) -> {
                     finish()
                     onDownload(PendingDownload.fromUrl(url, opener.userAgent).copy(referer = opener.url.takeIf { it.startsWith("http") }))
