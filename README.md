@@ -59,7 +59,16 @@ The app checks `releases/latest/download/update.json` when it opens (at most eve
 4. On the Downloads tab, tap **Allow** on the battery card. This lets downloads keep going in the background.
 5. **Xiaomi / Oppo / Vivo / Realme / Huawei / Infinix:** also open *App info → Battery* and set it to **No restrictions**. Turn on **Autostart** if your phone has it. These brands kill background apps aggressively.
 
-Every build is signed with the same key (`keystore/dlmanager.jks`), so new versions install over old ones without uninstalling. **Keep the repo private:** anyone with the key could sign an app that installs as an update to yours.
+## Signing key
+Every CI build is signed with the same key, so new versions (and OTA updates) install over old ones. The key is `keystore/release.p12`, encrypted with a password that only GitHub knows:
+
+1. On GitHub open **Settings → Secrets and variables → Actions → New repository secret**.
+2. Name: `SIGNING_PASSWORD`. Value: a random password of **at least 20 characters** (use a password generator). Keep a copy in your password manager; without it you can't build updates that install over the app.
+3. Run **Build APK** on `main` (or push to it). The first run creates `keystore/release.p12` and commits it. The file is useless without the password.
+
+Branch builds without the secret or the key use a throwaway key, only to check that the app builds; don't install those over a release. Local builds need the password in the `SIGNING_PASSWORD` environment variable (or `-PsigningPassword=…`), otherwise the release APK is unsigned; debug builds use Android's standard debug key.
+
+**Switching from the old key:** versions signed with the old `keystore/dlmanager.jks` (everything up to 1.1.3) can't be updated to builds with the new key. Uninstall DL Manager once and install the new APK from the latest Release. Downloaded files stay in Downloads/DLManager; the download list, tabs and bookmarks are reset.
 
 ## Background downloads: what to expect
 | Situation | Result |

@@ -12,6 +12,12 @@ val updateRepo = (findProperty("updateRepo") as String?)
     ?: System.getenv("GITHUB_REPOSITORY")
     ?: "marktamsedesign-oss/DownloadManager"
 
+// Release signing key: keystore/release.p12. The build workflow creates it on its first run on main,
+// encrypted with the SIGNING_PASSWORD repository secret, which only GitHub knows. Without the password
+// (e.g. a local build) the release APK is left unsigned; debug builds use Android's standard debug key.
+val signingPassword = System.getenv("SIGNING_PASSWORD") ?: findProperty("signingPassword") as String?
+val signingKeystore = System.getenv("SIGNING_KEYSTORE")?.let { file(it) } ?: rootProject.file("keystore/release.p12")
+
 android {
     namespace = "com.markt.dlmanager"
     compileSdk = 35
@@ -25,13 +31,16 @@ android {
         buildConfigField("String", "UPDATE_URL", "\"https://github.com/$updateRepo/releases/latest/download/update.json\"")
     }
 
-    // Fixed key so every build (local or GitHub Actions) can update the installed app.
+    // Same key for every CI build, so each new version (and each OTA update) installs over the last one.
     signingConfigs {
-        create("dlm") {
-            storeFile = rootProject.file("keystore/dlmanager.jks")
-            storePassword = "dlmanager"
-            keyAlias = "dlmanager"
-            keyPassword = "dlmanager"
+        if (!signingPassword.isNullOrEmpty() && signingKeystore.exists()) {
+            create("release") {
+                storeFile = signingKeystore
+                storeType = "PKCS12"
+                storePassword = signingPassword
+                keyAlias = "dlmanager"
+                keyPassword = signingPassword
+            }
         }
     }
 
@@ -40,10 +49,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("dlm")
-        }
-        debug {
-            signingConfig = signingConfigs.getByName("dlm")
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 
