@@ -86,6 +86,25 @@ object PageScripts {
         """.trimIndent()
     }
 
+    /**
+     * Lists the page's players and their files as [{u: url, a: isAudio, w: width, h: height}],
+     * plus the video the page declares for link previews (og:video).
+     */
+    val findMedia: String = """
+        (function () {
+          var out = [];
+          document.querySelectorAll('video,audio').forEach(function (v) {
+            var audio = v.tagName === 'AUDIO';
+            var src = v.currentSrc || v.src;
+            if (src) out.push({ u: src, a: audio, w: v.videoWidth || 0, h: v.videoHeight || 0 });
+            v.querySelectorAll('source[src]').forEach(function (s) { out.push({ u: s.src, a: audio, w: 0, h: 0 }); });
+          });
+          document.querySelectorAll('meta[property="og:video"],meta[property="og:video:url"],meta[property="og:video:secure_url"]')
+            .forEach(function (m) { if (m.content) out.push({ u: m.content, a: false, w: 0, h: 0 }); });
+          return out.slice(0, 50);
+        })();
+    """.trimIndent()
+
     /** Lists every link and media source on the page as [{u: url, t: text}]. */
     val findLinks: String = """
         (function () {

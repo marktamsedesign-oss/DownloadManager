@@ -20,10 +20,12 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.markt.dlmanager.engine.Http
 import com.markt.dlmanager.engine.PendingDownload
+import org.json.JSONArray
 
 /** One browser tab: a WebView (created when first shown) plus the state the UI draws. */
 @SuppressLint("SetJavaScriptEnabled")
@@ -57,6 +59,9 @@ class BrowserTab internal constructor(
     var blockedCount by mutableIntStateOf(0)
     /** Find-in-page result: current match (1-based) and total. */
     var findResult by mutableStateOf<Pair<Int, Int>?>(null)
+    /** Videos and audio files this page has played or contains. */
+    val media = mutableStateListOf<DetectedMedia>()
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     /** Site of the open page, readable from WebView's background threads. */
     @Volatile private var siteNow: String = Shields.site(restoreUrl)
@@ -144,6 +149,41 @@ class BrowserTab internal constructor(
     fun clearFind() {
         _webView?.clearMatches()
         findResult = null
+    }
+
+    /** Looks for players on the page (adds what it finds to [media]), then calls [onDone]. */
+    fun scanMedia(onDone: () -> Unit = {}) {
+        val wv = _webView
+        if (wv == null || !hasPage) {
+            onDone()
+            return
+        }
+        wv.evaluateJavascript(PageScripts.findMedia) { json ->
+            runCatching {
+                val arr = JSONArray(json)
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    addMedia(o.optString("u"), o.optBoolean("a"), o.optInt("w"), o.optInt("h"))
+                }
+            }
+            onDone()
+        }
+    }
+
+    /** Main thread only. */
+    private fun addMedia(rawUrl: String, audioHint: Boolean, width: Int = 0, height: Int = 0) {
+        if (rawUrl.isBlank()) return
+        val streamed = Shields.isStream(rawUrl)
+        if (!streamed && !rawUrl.startsWith("http")) return
+        if (rawUrl.startsWith("http") && Shields.isAdHost(Uri.parse(rawUrl).host)) return    // video ads
+        val url = Shields.mediaKey(rawUrl)
+        val audio = audioHint || Shields.isAudioFile(url)
+        val i = media.indexOfFirst { it.url == url }
+        if (i >= 0) {
+            if (width > 0 && media[i].width == 0) media[i] = media[i].copy(width = width, height = height)
+            return
+        }
+        if (media.size < 30) media.add(DetectedMedia(url, streamed, audio, width, height))
     }
 
     /** Collects the file and download links on the page (ads left out) for "Find download links". */
@@ -297,6 +337,16 @@ class BrowserTab internal constructor(
 
         override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
             if (BrowserPrefs.blockAdsOn(siteNow) && Shields.isAdHost(request.url.host)) return Shields.emptyResponse()
+            // video/audio the page loads: by file type, or a player asking for a whole file in byte ranges
+            if (!request.isForMainFrame) {
+                val u = request.url.toString()
+                val isMedia = Shields.isVideoFile(u) || Shields.isAudioFile(u) || Shields.isStream(u) ||
+                    Shields.isPlayerRequest(request.requestHeaders)
+                if (isMedia) {
+                    val pageSite = siteNow
+                    mainHandler.post { if (pageSite == siteNow) addMedia(u, audioHint = false) }   // still the same page's site
+                }
+            }
             return null
         }
 
@@ -307,6 +357,7 @@ class BrowserTab internal constructor(
             blockedCount = 0
             this@BrowserTab.favicon = null
             findResult = null
+            media.clear()
             sync()
         }
 
@@ -314,6 +365,7 @@ class BrowserTab internal constructor(
             sync()
             if (title.isEmpty() && hasPage) title = view.title.orEmpty()
             injectShield(view)
+            scanMedia()
             browser.persist()
         }
 
@@ -361,6 +413,15 @@ class BrowserTab internal constructor(
                 .replace(" Mobile", "")
     }
 }
+
+/** A video or audio file found on the page. [streamed] ones (blob:, HLS, DASH) can't be saved as a file. */
+data class DetectedMedia(
+    val url: String,
+    val streamed: Boolean,
+    val audio: Boolean,
+    val width: Int = 0,
+    val height: Int = 0,
+)
 
 /** A long-pressed link or image. */
 data class LongPress(val url: String, val isImage: Boolean, val tab: BrowserTab)
