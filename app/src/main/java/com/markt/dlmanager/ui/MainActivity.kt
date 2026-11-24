@@ -101,7 +101,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             DLTheme {
                 val fullscreen = browser.fullscreenView != null
-                LaunchedEffect(fullscreen) { setImmersive(fullscreen) }
+                LaunchedEffect(fullscreen) { enterVideoFullscreen(fullscreen) }
                 AppRoot(browser, screen, pending)
             }
         }
@@ -148,7 +148,7 @@ class MainActivity : ComponentActivity() {
     }
 
     /** Full-screen video: hide the status and navigation bars and keep the screen on. */
-    private fun setImmersive(on: Boolean) {
+    private fun enterVideoFullscreen(on: Boolean) {
         val controller = WindowCompat.getInsetsController(window, window.decorView)
         if (on) {
             controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
