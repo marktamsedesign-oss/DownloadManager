@@ -78,10 +78,56 @@ object Shields {
     /** True when the URL's path ends in a file type we download (…/file.apk?token=…). */
     fun looksLikeFile(url: String?): Boolean {
         if (url.isNullOrEmpty() || !url.startsWith("http")) return false
-        val path = runCatching { Uri.parse(url).path }.getOrNull() ?: return false
-        val ext = path.substringAfterLast('/').substringAfterLast('.', "").lowercase()
-        return ext in fileExtensions
+        return extension(url) in fileExtensions
     }
+
+    // region Media detection
+
+    private val videoExtensions = setOf("mp4", "m4v", "webm", "mkv", "mov", "3gp", "avi", "flv", "wmv", "ogv")
+    private val audioExtensions = setOf("mp3", "m4a", "aac", "ogg", "oga", "opus", "flac", "wav")
+    /** Playlists of small pieces (HLS, DASH…): played as a stream, not one file we can save. */
+    private val streamExtensions = setOf("m3u8", "mpd", "ism", "f4m")
+
+    fun extension(url: String): String {
+        val path = runCatching { Uri.parse(url).path }.getOrNull() ?: return ""
+        return path.substringAfterLast('/').substringAfterLast('.', "").lowercase()
+    }
+
+    fun isVideoFile(url: String): Boolean = extension(url) in videoExtensions
+    fun isAudioFile(url: String): Boolean = extension(url) in audioExtensions
+    fun isStream(url: String): Boolean = url.startsWith("blob:") || extension(url) in streamExtensions
+
+    /**
+     * True for the first request a <video>/<audio> player makes for a file: it asks for the whole
+     * file from the start ("Range: bytes=0-"). This catches videos whose link has no file type.
+     * (Streaming players fetch pieces with closed ranges, which don't match.)
+     */
+    fun isPlayerRequest(headers: Map<String, String>?): Boolean {
+        if (headers.isNullOrEmpty()) return false
+        val range = headers.entries.firstOrNull { it.key.equals("Range", true) }?.value ?: return false
+        return range.replace(" ", "") == "bytes=0-"
+    }
+
+    /** Players often re-request the same file with a byte range in the link; treat those as one. */
+    fun mediaKey(url: String): String {
+        if (!url.startsWith("http")) return url
+        val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return url
+        val names = runCatching { uri.queryParameterNames }.getOrNull() ?: return url
+        val drop = setOf("range", "bytestart", "byteend")
+        if (names.none { it.lowercase() in drop }) return url
+        val b = uri.buildUpon().clearQuery()
+        names.filter { it.lowercase() !in drop }.forEach { n -> uri.getQueryParameters(n).forEach { b.appendQueryParameter(n, it) } }
+        return b.build().toString()
+    }
+
+    /** "720p" or "1920×1080" when the link or the player tells us. */
+    fun quality(url: String, width: Int, height: Int): String? {
+        if (width > 0 && height > 0) return "${width}×$height"
+        return Regex("""(?<![0-9])(2160|1440|1080|720|540|480|360|240|144)p(?![0-9])""", RegexOption.IGNORE_CASE)
+            .find(url)?.groupValues?.get(1)?.let { "${it}p" }
+    }
+
+    // endregion
 
     private val downloadWords =
         Regex("""download|descarg|baixar|telecharg|herunterlad|scarica|unduh|\bget\b|\bdl\b|mirror""", RegexOption.IGNORE_CASE)

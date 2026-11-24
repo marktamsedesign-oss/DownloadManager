@@ -21,6 +21,9 @@ download at the same time over separate connections, like IDM.
 - **Pop-up blocker that lets downloads through:**
   - A new window (window.open, target=_blank) is followed invisibly, with its scripts off and through any redirects, just far enough to see what it is. If it's a **file, it goes to the downloader**; if it's a page on the **same site** (e.g. a "your download is ready" page) it opens as a normal new tab; if it's a page on **another site**, it's **blocked** before it shows, with an **Open** button in case you wanted it.
   - Blocks the "tab-under" trick (a click opens a pop-up and sends the current tab to an ad), and redirects into the Play Store or other apps without a tap.
+- **Video detection:** when a page plays or contains a video (or audio) file, a **Video** button appears over the page. It lists what was found with quality, size and type; tap one to download it. Also in ⋮ → *Videos on this page*.
+  - Found two ways: from the files the page's player loads (including links without a file type) and from the page's video/audio players.
+  - Video ads are left out. Streamed videos (HLS/DASH pieces, `blob:` players, copy-protected video sites) are listed as *can't be saved*.
 - **Ad blocker for download sites:**
   - Blocks pop-up, redirect, banner and native ad networks, and hides common ad boxes.
   - Removes invisible layers that sit on top of a page to steal taps: when you touch the screen, anything big and invisible (or a full-screen ad frame) right under your finger is removed first, so the tap reaches the real button.
@@ -86,7 +89,7 @@ Branch builds without the secret or the key use a throwaway key, only to check t
 | Server doesn't support split downloads | ▶ downloads with 1 thread; a retry has to start again from 0 |
 
 ## Limits
-- Streaming sites (YouTube, Facebook video, Netflix…) use protected or segmented streams. This app can't save those, and doing so usually breaks the site's terms.
+- Streaming sites (YouTube, Facebook video, Netflix…) use protected or segmented streams. The video button shows them as *streamed, can't be saved*: this app doesn't save those, and doing so usually breaks the site's terms. Only save videos you have the right to keep.
 - Files the page builds with JavaScript (`blob:` links) can't be handed to the downloader.
 - Some servers limit connections per user. If a site errors or slows down, use 4–8 threads.
 
@@ -101,7 +104,8 @@ app/src/main/java/com/markt/dlmanager/
   browser/Browser.kt       tabs, pop-up probe, other-app links, full-screen video
   browser/BrowserTab.kt    one tab's WebView + download detection + long-press
   browser/Shields.kt       ad-network list, site/file-type helpers, download-link ranking
-  browser/PageScripts.kt   in-page scripts: ad boxes, tap-stealing layers, link finder
+  browser/PageScripts.kt   in-page scripts: ad boxes, tap-stealing layers, link finder, media scan
+  browser/MediaProbe.kt    size/type check for found videos
   browser/BrowserPrefs.kt  search engine, blocker settings, per-site switches, bookmarks, saved tabs
   update/Updater.kt        OTA: update.json, download, SHA-256 check, installer
   ui/BrowserScreen.kt      address bar, toolbar, menu, start page, find in page

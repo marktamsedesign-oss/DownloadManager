@@ -51,6 +51,8 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -112,9 +114,13 @@ import com.markt.dlmanager.browser.Bookmark
 import com.markt.dlmanager.browser.Browser
 import com.markt.dlmanager.browser.BrowserPrefs
 import com.markt.dlmanager.browser.BrowserTab
+import com.markt.dlmanager.browser.DetectedMedia
 import com.markt.dlmanager.browser.FoundLink
+import com.markt.dlmanager.browser.MediaProbe
 import com.markt.dlmanager.browser.Shields
 import com.markt.dlmanager.engine.PendingDownload
+import com.markt.dlmanager.engine.Probe
+import com.markt.dlmanager.util.Fmt
 import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -140,6 +146,7 @@ fun BrowserScreen(
     var finding by remember { mutableStateOf(false) }
     var findQuery by remember { mutableStateOf("") }
     var foundLinks by remember { mutableStateOf<List<FoundLink>?>(null) }
+    var showMedia by remember { mutableStateOf(false) }
     val imeVisible = WindowInsets.isImeVisible
 
     // The address field shows the site while browsing and the full link (all selected) while editing.
@@ -219,11 +226,25 @@ fun BrowserScreen(
                     onOpen = { tab.load(it) },
                 )
             }
+            val savable = tab.media.filter { !it.streamed }
             if (!editing && tab.hasPage && Shields.looksLikeFile(tab.url)) {
                 ExtendedFloatingActionButton(
                     onClick = { tab.pageDownload()?.let(onDownload) },
                     icon = { Icon(Icons.Filled.FileDownload, null) },
                     text = { Text("Download") },
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+                )
+            } else if (!editing && tab.hasPage && savable.isNotEmpty()) {
+                // a video (or audio) file was found on this page
+                val allAudio = savable.all { it.audio }
+                ExtendedFloatingActionButton(
+                    onClick = { showMedia = true },
+                    icon = { Icon(if (allAudio) Icons.Filled.MusicNote else Icons.Filled.Movie, null) },
+                    text = {
+                        Text(
+                            (if (allAudio) "Audio" else "Video") + if (savable.size > 1) " (${savable.size})" else "",
+                        )
+                    },
                     modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
                 )
             }
@@ -249,6 +270,7 @@ fun BrowserScreen(
                 onOpenDownloads = onOpenDownloads,
                 onFind = { findQuery = ""; finding = true },
                 onFindLinks = ::findLinks,
+                onShowMedia = { showMedia = true },
                 onDownloadPage = { tab.pageDownload()?.let(onDownload) },
                 onShare = {
                     val send = Intent(Intent.ACTION_SEND).setType("text/plain")
@@ -263,6 +285,14 @@ fun BrowserScreen(
                 onOpenSettings = onOpenSettings,
             )
         }
+    }
+
+    if (showMedia) {
+        MediaDialog(
+            tab = tab,
+            onDismiss = { showMedia = false },
+            onDownload = { showMedia = false; onDownload(it) },
+        )
     }
 
     foundLinks?.let { links ->
@@ -471,6 +501,97 @@ private fun SwitchItem(text: String, checked: Boolean, onChange: (Boolean) -> Un
     )
 }
 
+/** Videos and audio found on the page, with size and type from the server; tap to download. */
+@Composable
+private fun MediaDialog(tab: BrowserTab, onDismiss: () -> Unit, onDownload: (PendingDownload) -> Unit) {
+    var scanning by remember { mutableStateOf(true) }
+    LaunchedEffect(tab.id) { tab.scanMedia { scanning = false } }
+    val items = tab.media.toList()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Videos on this page") },
+        text = {
+            Column(
+                Modifier
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                if (items.isEmpty()) {
+                    Text(
+                        if (scanning) "Looking…" else "No video found yet. Start playing the video, then open this again.",
+                    )
+                }
+                items.forEachIndexed { i, m -> MediaRow(m, i, tab, onDownload) }
+                if (items.any { it.streamed }) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Streamed videos come in many small pieces or are copy-protected (most video and TV " +
+                            "sites), so they can't be saved as one file.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
+}
+
+@Composable
+private fun MediaRow(m: DetectedMedia, index: Int, tab: BrowserTab, onDownload: (PendingDownload) -> Unit) {
+    var probe by remember(m.url) { mutableStateOf<Probe?>(null) }
+    var checking by remember(m.url) { mutableStateOf(!m.streamed) }
+    if (!m.streamed) {
+        LaunchedEffect(m.url) {
+            probe = MediaProbe.probe(m.url, tab.url, tab.userAgent)
+            checking = false
+        }
+    }
+    val p = probe
+    // the server answered with a web page, not a file: nothing to save here
+    val notMedia = p?.mimeType?.startsWith("text/") == true
+    val canSave = !m.streamed && !notMedia
+    val name = p?.fileName ?: m.url.substringBefore('?').substringAfterLast('/').takeIf { it.contains('.') }
+        ?: "${if (m.audio) "Audio" else "Video"} ${index + 1}"
+    val details = buildList {
+        Shields.quality(m.url, m.width, m.height)?.let(::add)
+        when {
+            m.streamed -> add("streamed, can't be saved")
+            checking -> add("checking…")
+            notMedia -> add("not a file")
+            p == null -> add("size unknown")
+            else -> {
+                if (p.totalBytes > 0) add(Fmt.bytes(p.totalBytes))
+                p.mimeType?.let(::add)
+            }
+        }
+        if (m.url.startsWith("http")) add(Shields.host(m.url))
+    }.joinToString(" · ")
+    val save = {
+        onDownload(
+            PendingDownload(
+                url = m.url,
+                fileName = name,
+                nameKnown = p?.fileName != null,
+                mimeType = p?.mimeType?.takeIf { it.startsWith("video/") || it.startsWith("audio/") },
+                size = p?.totalBytes ?: -1,
+                referer = tab.url.takeIf { it.startsWith("http") },
+                userAgent = tab.userAgent,
+            )
+        )
+    }
+    ListItem(
+        headlineContent = { Text(name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+        supportingContent = { Text(details, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+        leadingContent = { Icon(if (m.audio) Icons.Filled.MusicNote else Icons.Filled.Movie, null) },
+        trailingContent = if (canSave) {
+            { IconButton(onClick = save) { Icon(Icons.Filled.FileDownload, "Download") } }
+        } else null,
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        modifier = Modifier.clickable(enabled = canSave, onClick = save),
+    )
+}
+
 /** "Find download links": the page's file and download links, with ads left out. */
 @Composable
 private fun FoundLinksDialog(
@@ -589,6 +710,7 @@ private fun BottomBar(
     onOpenDownloads: () -> Unit,
     onFind: () -> Unit,
     onFindLinks: () -> Unit,
+    onShowMedia: () -> Unit,
     onDownloadPage: () -> Unit,
     onShare: () -> Unit,
     onCopyLink: () -> Unit,
@@ -634,6 +756,12 @@ private fun BottomBar(
                         leadingIcon = { Icon(Icons.Filled.FileDownload, null) },
                         enabled = tab.hasPage,
                         onClick = { menuOpen = false; onDownloadPage() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Videos on this page") },
+                        leadingIcon = { Icon(Icons.Filled.Movie, null) },
+                        enabled = tab.hasPage,
+                        onClick = { menuOpen = false; onShowMedia() },
                     )
                     DropdownMenuItem(
                         text = { Text("Find download links") },
