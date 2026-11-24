@@ -17,6 +17,31 @@ data class Bookmark(val title: String, val url: String)
 
 data class SavedTab(val url: String, val title: String)
 
+/**
+ * A per-site switch (e.g. "pop-ups allowed on example.com"), saved in prefs.
+ * [sites] is for Compose; [contains] can also be called from WebView's background threads.
+ */
+class SiteList internal constructor(private val key: String) {
+    val sites = mutableStateListOf<String>()
+    @Volatile private var snapshot: Set<String> = emptySet()
+
+    internal fun load(prefs: SharedPreferences) {
+        sites.clear()
+        sites.addAll(prefs.getStringSet(key, emptySet()).orEmpty().sorted())
+        snapshot = sites.toSet()
+    }
+
+    operator fun contains(site: String): Boolean = site.isNotEmpty() && site in snapshot
+
+    internal fun set(prefs: SharedPreferences, site: String, on: Boolean) {
+        if (site.isEmpty()) return
+        if (on && site !in sites) sites.add(site)
+        if (!on) sites.remove(site)
+        snapshot = sites.toSet()
+        prefs.edit().putStringSet(key, snapshot).apply()
+    }
+}
+
 /** Browser settings, bookmarks, pop-up exceptions and open tabs. */
 object BrowserPrefs {
     private lateinit var prefs: SharedPreferences
@@ -24,8 +49,14 @@ object BrowserPrefs {
     /** Observable from Compose. */
     val bookmarks = mutableStateListOf<Bookmark>()
 
-    /** Sites (e.g. "example.com") where pop-ups are allowed. Observable from Compose. */
-    val popupSites = mutableStateListOf<String>()
+    /** Sites (e.g. "example.com") where pop-ups are allowed. */
+    val popupSites = SiteList("popupSites")
+
+    /** Sites where ads are allowed (for sites that refuse to work with an ad blocker). */
+    val adSites = SiteList("adSites")
+
+    /** Sites where every tap that leads to another site asks first. */
+    val guardSites = SiteList("guardSites")
 
     fun init(context: Context) {
         prefs = context.getSharedPreferences("browser", Context.MODE_PRIVATE)
@@ -37,8 +68,9 @@ object BrowserPrefs {
                 bookmarks.add(Bookmark(o.optString("title"), o.getString("url")))
             }
         }
-        popupSites.clear()
-        popupSites.addAll(prefs.getStringSet("popupSites", emptySet()).orEmpty().sorted())
+        popupSites.load(prefs)
+        adSites.load(prefs)
+        guardSites.load(prefs)
     }
 
     var searchEngine: SearchEngine
@@ -51,21 +83,22 @@ object BrowserPrefs {
         get() = prefs.getBoolean("blockPopups", true)
         set(v) = prefs.edit().putBoolean("blockPopups", v).apply()
 
-    /** Block requests to known pop-up / redirect ad networks. */
+    /** Block ad networks, hide ad boxes and remove invisible layers that steal taps. */
     var blockAdHosts: Boolean
         get() = prefs.getBoolean("blockAdHosts", true)
         set(v) = prefs.edit().putBoolean("blockAdHosts", v).apply()
 
-    // region Pop-up exceptions
+    // region Per-site switches
 
-    fun popupsAllowed(site: String): Boolean = site.isNotEmpty() && site in popupSites
+    fun popupsAllowed(site: String): Boolean = site in popupSites
+    fun setPopupsAllowed(site: String, allowed: Boolean) = popupSites.set(prefs, site, allowed)
 
-    fun setPopupsAllowed(site: String, allowed: Boolean) {
-        if (site.isEmpty()) return
-        if (allowed && site !in popupSites) popupSites.add(site)
-        if (!allowed) popupSites.remove(site)
-        prefs.edit().putStringSet("popupSites", popupSites.toSet()).apply()
-    }
+    /** True when ads should be blocked on this site. Safe to call from any thread. */
+    fun blockAdsOn(site: String): Boolean = blockAdHosts && site !in adSites
+    fun setAdsAllowed(site: String, allowed: Boolean) = adSites.set(prefs, site, allowed)
+
+    fun alwaysAsk(site: String): Boolean = site in guardSites
+    fun setAlwaysAsk(site: String, on: Boolean) = guardSites.set(prefs, site, on)
 
     // endregion
 

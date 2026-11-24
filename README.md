@@ -20,8 +20,13 @@ download at the same time over separate connections, like IDM.
   - Bookmarks on the start page, find in page, share, copy link, desktop site, full-screen video, file uploads, choice of search engine (Google, DuckDuckGo, Bing, Brave).
 - **Pop-up blocker that lets downloads through:**
   - A new window (window.open, target=_blank) is followed invisibly, with its scripts off and through any redirects, just far enough to see what it is. If it's a **file, it goes to the downloader**; if it's a page on the **same site** (e.g. a "your download is ready" page) it opens as a normal new tab; if it's a page on **another site**, it's **blocked** before it shows, with an **Open** button in case you wanted it.
-  - Blocks the "tab-under" trick (a click opens a pop-up and sends the current tab to an ad), redirects into the Play Store or other apps without a tap, and requests to known pop-under ad networks.
-  - The shield next to the address bar shows how many things were blocked on the page and lets you **allow pop-ups on that site** (needed for some "Sign in with…" windows).
+  - Blocks the "tab-under" trick (a click opens a pop-up and sends the current tab to an ad), and redirects into the Play Store or other apps without a tap.
+- **Ad blocker for download sites:**
+  - Blocks pop-up, redirect, banner and native ad networks, and hides common ad boxes.
+  - Removes invisible layers that sit on top of a page to steal taps: when you touch the screen, anything big and invisible (or a full-screen ad frame) right under your finger is removed first, so the tap reaches the real button.
+  - On a page that has already tried pop-ups or redirects, a tap that leads to another site asks first ("That tap leads to adsite.com · Open"). Fake download buttons are usually links to ad sites. Links straight to files still go through.
+  - **Find download links** (⋮ menu or the shield) lists the page's file and download links with ads left out, so you can download without touching the ad-covered button.
+  - The shield next to the address bar shows how many things were blocked and has per-site switches: **Block pop-ups** (turn off for "Sign in with…" windows), **Block ads** (turn off if a site refuses to work with an ad blocker) and **Ask before opening other sites**.
 - **Over-the-air updates:** the app checks GitHub Releases, downloads a new version with its own engine, checks its SHA-256 and opens Android's installer. See *Updates* below.
 - **Add link** on the Downloads screen, or **share a link** to DL Manager from Chrome, Messenger, Telegram or any other app, or pick it under *Open with*.
 - **Login links work:** the browser's cookies, user agent and referer are sent with each download.
@@ -95,8 +100,9 @@ app/src/main/java/com/markt/dlmanager/
   service/DownloadService  foreground service + wake lock + notification
   browser/Browser.kt       tabs, pop-up probe, other-app links, full-screen video
   browser/BrowserTab.kt    one tab's WebView + download detection + long-press
-  browser/Shields.kt       ad-network list, site/file-type helpers
-  browser/BrowserPrefs.kt  search engine, blocker settings, bookmarks, saved tabs
+  browser/Shields.kt       ad-network list, site/file-type helpers, download-link ranking
+  browser/PageScripts.kt   in-page scripts: ad boxes, tap-stealing layers, link finder
+  browser/BrowserPrefs.kt  search engine, blocker settings, per-site switches, bookmarks, saved tabs
   update/Updater.kt        OTA: update.json, download, SHA-256 check, installer
   ui/BrowserScreen.kt      address bar, toolbar, menu, start page, find in page
   ui/TabsScreen.kt         tab switcher

@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -47,6 +48,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Public
@@ -71,6 +73,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -89,6 +92,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -108,6 +112,7 @@ import com.markt.dlmanager.browser.Bookmark
 import com.markt.dlmanager.browser.Browser
 import com.markt.dlmanager.browser.BrowserPrefs
 import com.markt.dlmanager.browser.BrowserTab
+import com.markt.dlmanager.browser.FoundLink
 import com.markt.dlmanager.browser.Shields
 import com.markt.dlmanager.engine.PendingDownload
 import kotlinx.coroutines.delay
@@ -134,6 +139,7 @@ fun BrowserScreen(
     var field by remember { mutableStateOf(TextFieldValue("")) }
     var finding by remember { mutableStateOf(false) }
     var findQuery by remember { mutableStateOf("") }
+    var foundLinks by remember { mutableStateOf<List<FoundLink>?>(null) }
     val imeVisible = WindowInsets.isImeVisible
 
     // The address field shows the site while browsing and the full link (all selected) while editing.
@@ -163,6 +169,10 @@ fun BrowserScreen(
     fun clip(): String? = clipboard.getText()?.text?.trim()?.takeIf { it.isNotEmpty() }
         .also { if (it == null) browser.notice("The clipboard is empty") }
 
+    fun findLinks() {
+        tab.findDownloadLinks { foundLinks = it }
+    }
+
     fun back() {
         if (tab.canGoBack) tab.goBack() else if (tab.isPopup) browser.closeTab(tab)
     }
@@ -191,7 +201,7 @@ fun BrowserScreen(
                 onFocusChange = { editing = it },
                 onGo = { go(field.text) },
                 onClear = { field = TextFieldValue("") },
-                popupsBlocked = BrowserPrefs.blockPopups && !BrowserPrefs.popupsAllowed(Shields.site(tab.url)),
+                onFindLinks = ::findLinks,
             )
         }
 
@@ -238,6 +248,7 @@ fun BrowserScreen(
                 onBack = ::back,
                 onOpenDownloads = onOpenDownloads,
                 onFind = { findQuery = ""; finding = true },
+                onFindLinks = ::findLinks,
                 onDownloadPage = { tab.pageDownload()?.let(onDownload) },
                 onShare = {
                     val send = Intent(Intent.ACTION_SEND).setType("text/plain")
@@ -252,6 +263,21 @@ fun BrowserScreen(
                 onOpenSettings = onOpenSettings,
             )
         }
+    }
+
+    foundLinks?.let { links ->
+        FoundLinksDialog(
+            links = links,
+            onDismiss = { foundLinks = null },
+            onDownload = { l ->
+                foundLinks = null
+                onDownload(PendingDownload.fromUrl(l.url, tab.userAgent).copy(referer = tab.url.takeIf { it.startsWith("http") }))
+            },
+            onOpen = { l ->
+                foundLinks = null
+                tab.load(l.url)
+            },
+        )
     }
 
     browser.longPress?.let { lp ->
@@ -304,7 +330,7 @@ private fun AddressBar(
     onFocusChange: (Boolean) -> Unit,
     onGo: () -> Unit,
     onClear: () -> Unit,
-    popupsBlocked: Boolean,
+    onFindLinks: () -> Unit,
 ) {
     val secure = tab.url.startsWith("https://")
     Row(
@@ -361,58 +387,141 @@ private fun AddressBar(
                 }
             }
         }
-        ShieldButton(tab, popupsBlocked)
+        ShieldButton(tab, onFindLinks)
     }
 }
 
-/** Shows how many pop-ups were blocked on this page and lets you allow them for the site. */
+/**
+ * The blocker's shield: how much was blocked on this page, per-site switches for pop-ups, ads and
+ * "ask before opening other sites", and "Find download links" for pages where ads cover the button.
+ */
 @Composable
-private fun ShieldButton(tab: BrowserTab, popupsBlocked: Boolean) {
+private fun ShieldButton(tab: BrowserTab, onFindLinks: () -> Unit) {
     var open by remember { mutableStateOf(false) }
     val site = Shields.site(tab.url)
+    // read the observable lists so the switches update right away
+    val popupsBlocked = BrowserPrefs.blockPopups && site !in BrowserPrefs.popupSites.sites
+    val adsBlocked = BrowserPrefs.blockAdHosts && site !in BrowserPrefs.adSites.sites
+    val alwaysAsk = site in BrowserPrefs.guardSites.sites
+    val guarded = popupsBlocked || adsBlocked
     Box {
         IconButton(onClick = { open = true }) {
             BadgedBox(badge = {
                 if (tab.blockedCount > 0) Badge { Text(if (tab.blockedCount > 99) "99+" else "${tab.blockedCount}") }
             }) {
                 Icon(
-                    if (popupsBlocked) Icons.Outlined.GppGood else Icons.Outlined.GppBad,
-                    contentDescription = "Pop-up blocker",
-                    tint = if (popupsBlocked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    if (guarded) Icons.Outlined.GppGood else Icons.Outlined.GppBad,
+                    contentDescription = "Pop-up and ad blocker",
+                    tint = if (guarded) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp).width(250.dp)) {
-                Text("Pop-up blocker", style = MaterialTheme.typography.titleSmall)
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp).width(260.dp)) {
+                Text("Pop-up & ad blocker", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.height(4.dp))
                 Text(
                     when {
-                        !BrowserPrefs.blockPopups -> "Turned off in Settings."
-                        !popupsBlocked -> "Pop-ups are allowed on $site."
-                        tab.blockedCount == 1 -> "1 pop-up or redirect blocked on this page. Downloads still go through."
-                        tab.blockedCount > 1 -> "${tab.blockedCount} pop-ups or redirects blocked on this page. Downloads still go through."
-                        else -> "Nothing blocked on this page. Pop-ups to other sites are blocked unless they start a download."
-                    },
+                        !BrowserPrefs.blockPopups && !BrowserPrefs.blockAdHosts -> "Turned off in Settings."
+                        tab.blockedCount == 1 -> "1 pop-up or redirect blocked on this page."
+                        tab.blockedCount > 1 -> "${tab.blockedCount} pop-ups or redirects blocked on this page."
+                        else -> "Nothing blocked on this page yet."
+                    } + " Pop-ups that start a download still go through. If ads cover the download button, " +
+                        "use Find download links.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (BrowserPrefs.blockPopups && site.isNotEmpty()) {
+            if (site.isNotEmpty()) {
+                HorizontalDivider()
+                Text(
+                    "On $site",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(start = 16.dp, top = 8.dp, end = 16.dp),
+                )
+                if (BrowserPrefs.blockPopups) {
+                    SwitchItem("Block pop-ups", popupsBlocked) { BrowserPrefs.setPopupsAllowed(site, !it) }
+                }
+                if (BrowserPrefs.blockAdHosts) {
+                    SwitchItem("Block ads", adsBlocked) {
+                        BrowserPrefs.setAdsAllowed(site, !it)
+                        tab.reload()
+                    }
+                }
+                SwitchItem("Ask before opening other sites", alwaysAsk) { BrowserPrefs.setAlwaysAsk(site, it) }
                 HorizontalDivider()
                 DropdownMenuItem(
-                    text = { Text("Allow pop-ups on $site", maxLines = 2) },
-                    trailingIcon = {
-                        Switch(
-                            checked = !popupsBlocked,
-                            onCheckedChange = { BrowserPrefs.setPopupsAllowed(site, it) },
-                        )
-                    },
-                    onClick = { BrowserPrefs.setPopupsAllowed(site, popupsBlocked) },
+                    text = { Text("Find download links") },
+                    leadingIcon = { Icon(Icons.Filled.Link, null) },
+                    enabled = tab.hasPage,
+                    onClick = { open = false; onFindLinks() },
                 )
             }
         }
     }
+}
+
+@Composable
+private fun SwitchItem(text: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    DropdownMenuItem(
+        text = { Text(text, maxLines = 2) },
+        trailingIcon = { Switch(checked = checked, onCheckedChange = onChange) },
+        onClick = { onChange(!checked) },
+    )
+}
+
+/** "Find download links": the page's file and download links, with ads left out. */
+@Composable
+private fun FoundLinksDialog(
+    links: List<FoundLink>,
+    onDismiss: () -> Unit,
+    onDownload: (FoundLink) -> Unit,
+    onOpen: (FoundLink) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Download links") },
+        text = {
+            if (links.isEmpty()) {
+                Text(
+                    "No download links found on this page yet. If the site shows a countdown or a " +
+                        "\"Generating link\" step, wait for it to finish and try again.",
+                )
+            } else {
+                Column(
+                    Modifier
+                        .heightIn(max = 440.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(
+                        "Ads are left out. Tap a file to download it, or a page link to open it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    links.take(60).forEach { l ->
+                        ListItem(
+                            headlineContent = { Text(l.label, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                            supportingContent = {
+                                Text(
+                                    Shields.host(l.url) + if (l.isFile) " · file" else " · page",
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            },
+                            leadingContent = { Icon(if (l.isFile) Icons.Filled.FileDownload else Icons.Filled.Public, null) },
+                            trailingContent = if (l.isFile) null else {
+                                { IconButton(onClick = { onDownload(l) }) { Icon(Icons.Filled.FileDownload, "Download this link") } }
+                            },
+                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                            modifier = Modifier.clickable { if (l.isFile) onDownload(l) else onOpen(l) },
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
 }
 
 @Composable
@@ -479,6 +588,7 @@ private fun BottomBar(
     onBack: () -> Unit,
     onOpenDownloads: () -> Unit,
     onFind: () -> Unit,
+    onFindLinks: () -> Unit,
     onDownloadPage: () -> Unit,
     onShare: () -> Unit,
     onCopyLink: () -> Unit,
@@ -524,6 +634,12 @@ private fun BottomBar(
                         leadingIcon = { Icon(Icons.Filled.FileDownload, null) },
                         enabled = tab.hasPage,
                         onClick = { menuOpen = false; onDownloadPage() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Find download links") },
+                        leadingIcon = { Icon(Icons.Filled.Link, null) },
+                        enabled = tab.hasPage,
+                        onClick = { menuOpen = false; onFindLinks() },
                     )
                     DropdownMenuItem(
                         text = { Text("Find in page") },
@@ -646,6 +762,7 @@ private fun Suggestion(icon: ImageVector, title: String, subtitle: String, onCli
         headlineContent = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         supportingContent = { Text(subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         leadingContent = { Icon(icon, null) },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
         modifier = Modifier.clickable(onClick = onClick),
     )
 }

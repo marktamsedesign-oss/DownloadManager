@@ -58,6 +58,8 @@ class BrowserTab internal constructor(
     /** Find-in-page result: current match (1-based) and total. */
     var findResult by mutableStateOf<Pair<Int, Int>?>(null)
 
+    /** Site of the open page, readable from WebView's background threads. */
+    @Volatile private var siteNow: String = Shields.site(restoreUrl)
     private var pendingUrl: String? = restoreUrl?.takeIf { it.isNotEmpty() }
     private var lastPopupAttempt = 0L
     private var _webView: WebView? = null
@@ -108,6 +110,7 @@ class BrowserTab internal constructor(
     }
 
     fun goBack() = _webView?.goBack()
+    fun reload() = _webView?.reload()
     fun goForward() = _webView?.goForward()
 
     fun reloadOrStop() {
@@ -141,6 +144,17 @@ class BrowserTab internal constructor(
     fun clearFind() {
         _webView?.clearMatches()
         findResult = null
+    }
+
+    /** Collects the file and download links on the page (ads left out) for "Find download links". */
+    fun findDownloadLinks(onResult: (List<FoundLink>) -> Unit) {
+        val wv = _webView
+        if (wv == null || !hasPage) {
+            onResult(emptyList())
+            return
+        }
+        val page = url
+        wv.evaluateJavascript(PageScripts.findLinks) { json -> onResult(Shields.rankLinks(json, page)) }
     }
 
     // endregion
@@ -177,6 +191,7 @@ class BrowserTab internal constructor(
         val wv = _webView ?: return
         val newUrl = wv.url.orEmpty()
         url = newUrl
+        siteNow = Shields.site(newUrl)
         canGoBack = wv.canGoBack()
         canGoForward = wv.canGoForward()
         hasPage = newUrl.isNotEmpty() && newUrl != "about:blank"
@@ -192,6 +207,20 @@ class BrowserTab internal constructor(
         if (SystemClock.elapsedRealtime() - lastPopupAttempt > 1_500) return false
         val from = Shields.site(url)
         return from.isNotEmpty() && Shields.site(target) != from
+    }
+
+    /**
+     * On pages that already tried pop-ups or redirects (or on sites set to "always ask"), a tap that
+     * leads to another site asks first: fake download buttons are usually links to ad sites.
+     */
+    private fun asksBeforeLeaving(target: String): Boolean {
+        val from = Shields.site(url)
+        if (from.isEmpty() || Shields.site(target) == from || Shields.looksLikeFile(target)) return false
+        return BrowserPrefs.alwaysAsk(from) || (blockedCount > 0 && browser.popupsBlockedFor(this))
+    }
+
+    private fun injectShield(view: WebView) {
+        if (hasPage && BrowserPrefs.blockAdsOn(siteNow)) view.evaluateJavascript(PageScripts.shield, null)
     }
 
     private fun onPageDownload(dlUrl: String, ua: String?, contentDisposition: String?, mimeType: String?, length: Long) {
@@ -243,15 +272,19 @@ class BrowserTab internal constructor(
             val scheme = uri.scheme?.lowercase() ?: return false
             if (scheme == "http" || scheme == "https") {
                 if (!request.isForMainFrame) return false
-                if (BrowserPrefs.blockAdHosts && Shields.isAdHost(uri.host)) {
+                val target = uri.toString()
+                if (BrowserPrefs.blockAdsOn(siteNow) && Shields.isAdHost(uri.host)) {
                     noteBlocked()
-                    browser.notice("Blocked a redirect to an ad")
+                    browser.notice("Blocked a link to an ad")
                     return true
                 }
-                if (!request.isRedirect && isTabUnder(uri.toString())) {
+                if (!request.isRedirect && isTabUnder(target)) {
                     noteBlocked()
-                    val target = uri.toString()
                     browser.notice("Blocked a redirect", "Open") { browser.newTab(target) }
+                    return true
+                }
+                if (!request.isRedirect && asksBeforeLeaving(target)) {
+                    browser.notice("That tap leads to ${Shields.host(target)}", "Open") { view.loadUrl(target) }
                     return true
                 }
                 return false
@@ -263,9 +296,11 @@ class BrowserTab internal constructor(
         }
 
         override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-            if (BrowserPrefs.blockAdHosts && Shields.isAdHost(request.url.host)) return Shields.emptyResponse()
+            if (BrowserPrefs.blockAdsOn(siteNow) && Shields.isAdHost(request.url.host)) return Shields.emptyResponse()
             return null
         }
+
+        override fun onPageCommitVisible(view: WebView, url: String?) = injectShield(view)
 
         override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
             // a new page: reset the per-page counters
@@ -278,6 +313,7 @@ class BrowserTab internal constructor(
         override fun onPageFinished(view: WebView, url: String?) {
             sync()
             if (title.isEmpty() && hasPage) title = view.title.orEmpty()
+            injectShield(view)
             browser.persist()
         }
 

@@ -192,23 +192,15 @@ fun SettingsDialog(browser: Browser, onDismiss: () -> Unit) {
                     onChange = { blockPopups = it },
                 )
                 SwitchRow(
-                    title = "Block pop-up ad networks",
-                    subtitle = "Stops known pop-under and redirect ad servers",
+                    title = "Block ads",
+                    subtitle = "Ad networks, ad boxes, and invisible layers that steal taps. " +
+                        "If a site refuses to work, allow ads on it from the shield.",
                     checked = blockAds,
                     onChange = { blockAds = it },
                 )
-                if (BrowserPrefs.popupSites.isNotEmpty()) {
-                    Spacer(Modifier.height(4.dp))
-                    Text("Pop-ups allowed on", fontWeight = FontWeight.Medium)
-                    BrowserPrefs.popupSites.toList().forEach { site ->
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(site, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                            IconButton(onClick = { BrowserPrefs.setPopupsAllowed(site, false) }) {
-                                Icon(Icons.Filled.Close, "Block pop-ups on $site again")
-                            }
-                        }
-                    }
-                }
+                SiteExceptions("Pop-ups allowed on", BrowserPrefs.popupSites.sites) { BrowserPrefs.setPopupsAllowed(it, false) }
+                SiteExceptions("Ads allowed on", BrowserPrefs.adSites.sites) { BrowserPrefs.setAdsAllowed(it, false) }
+                SiteExceptions("Always ask before leaving", BrowserPrefs.guardSites.sites) { BrowserPrefs.setAlwaysAsk(it, false) }
                 Spacer(Modifier.height(4.dp))
                 OutlinedButton(onClick = { confirmClear = true }) { Text("Clear cookies & site data") }
 
@@ -271,6 +263,20 @@ fun SettingsDialog(browser: Browser, onDismiss: () -> Unit) {
             },
             dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel") } },
         )
+    }
+}
+
+/** A list of sites with a per-site exception, each with a button to remove it. */
+@Composable
+private fun SiteExceptions(title: String, sites: List<String>, onRemove: (String) -> Unit) {
+    if (sites.isEmpty()) return
+    Spacer(Modifier.height(4.dp))
+    Text(title, fontWeight = FontWeight.Medium)
+    sites.toList().forEach { site ->
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(site, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            IconButton(onClick = { onRemove(site) }) { Icon(Icons.Filled.Close, "Remove $site") }
+        }
     }
 }
 
