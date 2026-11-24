@@ -17,6 +17,7 @@ import com.markt.dlmanager.util.Fmt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
@@ -31,12 +32,14 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.nio.ByteBuffer
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.min
 
 /**
@@ -53,11 +56,22 @@ object Downloads {
     const val MAX_THREADS = 32
     private const val MIN_SPLIT = 1L shl 20          // never create a part smaller than 1 MiB
     private const val BUFFER = 64 * 1024
+    // Downloads/ is served through Android's FUSE layer, where every write is a slow round trip.
+    // Collect network reads into big chunks and write those, instead of one write per 8–16 KB read.
+    private const val WRITE_CHUNK = 256 * 1024
+    private const val FLUSH_MS = 1_000L              // …but write at least once a second so progress moves
     private const val MAX_RETRIES = 12               // failures while online before giving up
 
     private lateinit var app: Context
     private lateinit var prefs: SharedPreferences
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /**
+     * Each connection blocks a thread while it reads. Dispatchers.IO is capped at 64 threads, so
+     * e.g. 3 downloads × 32 threads would starve each other (and the speed ticker). This view of IO
+     * is elastic and not bound by that cap.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val net = Dispatchers.IO.limitedParallelism(256)
     private val tasks = LinkedHashMap<String, Task>()
     private val _state = MutableStateFlow<List<DownloadInfo>>(emptyList())
     val state: StateFlow<List<DownloadInfo>> = _state.asStateFlow()
@@ -228,7 +242,7 @@ object Downloads {
         t.speed = 0
         t.sampleTime = 0
         val run = ++t.generation
-        t.job = scope.launch { runTask(t, run) }
+        t.job = scope.launch(net) { runTask(t, run) }
         startTicker()
     }
 
@@ -340,22 +354,47 @@ object Downloads {
     }
 
     private suspend fun runSegmented(t: Task) {
-        coroutineScope {
-            repeat(t.threads) {
-                launch {
-                    while (isActive) {
-                        val seg = claim(t) ?: break
+        var rounds = 0
+        while (true) {
+            val live = AtomicInteger(t.threads)          // workers still running in this round
+            coroutineScope {
+                repeat(t.threads) {
+                    launch(net) {
+                        var left = false
                         try {
-                            downloadSegment(t, seg)
+                            while (isActive) {
+                                val seg = claim(t) ?: break
+                                try {
+                                    downloadSegment(t, seg) { tryLeave(live).also { left = it } }
+                                } catch (e: ServerBusy) {
+                                    break            // the server wants fewer connections; others finish this part
+                                } finally {
+                                    seg.active = false
+                                }
+                            }
                         } finally {
-                            seg.active = false
+                            if (!left) live.decrementAndGet()
                         }
                     }
                 }
             }
+            if (t.downloaded() >= t.totalBytes) return
+            // a worker can leave just as the last one finishes; give the leftover parts another round
+            if (++rounds >= 3) throw IOException("Download incomplete — tap Retry")
         }
-        if (t.downloaded() < t.totalBytes) throw IOException("Download incomplete — tap Retry")
     }
+
+    /** Lets a worker stop if at least one other worker keeps going. */
+    private fun tryLeave(live: AtomicInteger): Boolean {
+        while (true) {
+            val n = live.get()
+            if (n <= 1) return false
+            if (live.compareAndSet(n, n - 1)) return true
+        }
+    }
+
+    /** Thrown when a server refuses an extra connection (429/503) while other connections still work. */
+    private class ServerBusy : IOException("Server limits connections")
 
     /** Give a thread an unfinished part, or split the biggest part that another thread is working on. */
     private fun claim(t: Task): Segment? {
@@ -378,7 +417,7 @@ object Downloads {
         }
     }
 
-    private suspend fun downloadSegment(t: Task, seg: Segment) {
+    private suspend fun downloadSegment(t: Task, seg: Segment, mayLeave: () -> Boolean) {
         var failures = 0
         while (seg.position <= seg.end) {
             currentCoroutineContext().ensureActive()
@@ -390,11 +429,19 @@ object Downloads {
             } catch (e: NotResumableException) {
                 throw e
             } catch (e: HttpStatusException) {
+                // "too many connections": drop this one instead of hammering the server with retries
+                if ((e.code == 429 || e.code == 503) && seg.position == before && mayLeave()) throw ServerBusy()
                 if (!e.retryable || ++failures > MAX_RETRIES) throw e
                 delay(backoff(failures))
             } catch (e: IOException) {
                 currentCoroutineContext().ensureActive()
-                if (seg.position > before) failures = 0      // it was making progress
+                if (seg.position > before) {
+                    // the connection was working and just dropped (common on servers that cap
+                    // per-connection transfer): reconnect right away instead of sitting idle
+                    failures = 0
+                    delay(200)
+                    continue
+                }
                 waitForNetwork()
                 if (++failures > MAX_RETRIES) throw e
                 delay(backoff(failures))
@@ -407,6 +454,7 @@ object Downloads {
         val to = seg.end
         if (from > to) return
         val conn = Http.connect(t.finalUrl ?: t.url, t.headers, "bytes=$from-$to") { t.connections.add(it) }
+        var readAll = false
         try {
             val code = conn.responseCode
             if (code == 200) throw NotResumableException()
@@ -415,26 +463,47 @@ object Downloads {
                 ?: throw IOException("Can't open the file for writing")
             ParcelFileDescriptor.AutoCloseOutputStream(pfd).use { out ->
                 val channel = out.channel
-                conn.inputStream.use { input ->
-                    val buf = ByteArray(BUFFER)
-                    while (true) {
-                        val pos = seg.position
-                        val want = min(BUFFER.toLong(), seg.end - pos + 1)
-                        if (want <= 0) break                  // part finished (or was split)
-                        val n = input.read(buf, 0, want.toInt())
-                        if (n < 0) throw IOException("Connection closed early")
-                        val allowed = min(n.toLong(), seg.end - pos + 1).toInt()
-                        if (allowed <= 0) break
+                val buf = ByteArray(WRITE_CHUNK)
+                var filled = 0                      // bytes in buf, not yet written
+                var bufStart = from                 // file position of buf[0]
+                var lastFlush = SystemClock.elapsedRealtime()
+
+                fun flush() {
+                    // the part may have been split meanwhile; never write past its (new) end
+                    val allowed = min(filled.toLong(), seg.end - bufStart + 1).toInt()
+                    if (allowed > 0) {
                         val bb = ByteBuffer.wrap(buf, 0, allowed)
-                        var p = pos
+                        var p = bufStart
                         while (bb.hasRemaining()) p += channel.write(bb, p)
                         seg.done.addAndGet(allowed.toLong())
+                        bufStart += allowed
                     }
+                    filled = 0
+                    lastFlush = SystemClock.elapsedRealtime()
+                }
+
+                conn.inputStream.use { input ->
+                    try {
+                        while (true) {
+                            val left = seg.end - (bufStart + filled) + 1
+                            if (left <= 0) break              // part finished (or was split)
+                            if (filled == buf.size) flush()
+                            val want = min((buf.size - filled).toLong(), left).toInt()
+                            val n = input.read(buf, filled, want)
+                            if (n < 0) throw IOException("Connection closed early")
+                            filled += n
+                            if (filled == buf.size || SystemClock.elapsedRealtime() - lastFlush >= FLUSH_MS) flush()
+                        }
+                    } finally {
+                        // keep what already arrived, also when the connection broke or the download was paused
+                        flush()
+                    }
+                    readAll = bufStart > to                   // whole response read → connection can be reused
                 }
             }
         } finally {
             t.connections.remove(conn)
-            conn.disconnect()
+            if (!readAll) conn.disconnect()
         }
     }
 
@@ -469,7 +538,7 @@ object Downloads {
             if (length > 0) t.totalBytes = length
             val pfd = app.contentResolver.openFileDescriptor(Uri.parse(t.contentUri), "rwt")
                 ?: throw IOException("Can't open the file for writing")
-            ParcelFileDescriptor.AutoCloseOutputStream(pfd).use { out ->
+            BufferedOutputStream(ParcelFileDescriptor.AutoCloseOutputStream(pfd), WRITE_CHUNK).use { out ->
                 conn.inputStream.use { input ->
                     val buf = ByteArray(BUFFER)
                     while (true) {

@@ -5,6 +5,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write   # publish the OTA release
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -18,10 +21,16 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # Every run gets a higher versionCode, so the app can offer it as an over-the-air update.
+      - name: Set version
+        run: |
+          echo "VERSION_CODE=$((100 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=1.1.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+
       - name: Build release APK
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease --stacktrace
+          ./gradlew assembleRelease --stacktrace -PversionCode="$VERSION_CODE" -PversionName="$VERSION_NAME"
 
       - name: Rename APK
         run: cp app/build/outputs/apk/release/app-release.apk DLManager.apk
@@ -30,3 +39,28 @@ jobs:
         with:
           name: DLManager-apk
           path: DLManager.apk
+
+      # Only builds of main/master are published. The app reads update.json from the latest release.
+      - name: Publish OTA update
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${VERSION_NAME}"
+          NOTES="$(git log -1 --pretty=%s)"
+          jq -n \
+            --argjson versionCode "$VERSION_CODE" \
+            --arg versionName "$VERSION_NAME" \
+            --arg apk "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/DLManager.apk" \
+            --arg sha256 "$(sha256sum DLManager.apk | cut -d' ' -f1)" \
+            --argjson size "$(stat -c%s DLManager.apk)" \
+            --arg notes "$NOTES" \
+            '{versionCode: $versionCode, versionName: $versionName, apk: $apk, sha256: $sha256, size: $size, notes: $notes}' \
+            > update.json
+          cat update.json
+          gh release create "$TAG" DLManager.apk update.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "DL Manager ${VERSION_NAME}" \
+            --notes "$NOTES" \
+            --latest

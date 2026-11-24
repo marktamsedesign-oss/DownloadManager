@@ -4,6 +4,14 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// CI passes -PversionCode / -PversionName (from the run number) so every build can update the last one.
+val ciVersionCode = (findProperty("versionCode") as String?)?.toIntOrNull()
+val ciVersionName = findProperty("versionName") as String?
+// Where the app looks for OTA updates: the latest GitHub release of this repository.
+val updateRepo = (findProperty("updateRepo") as String?)
+    ?: System.getenv("GITHUB_REPOSITORY")
+    ?: "marktamsedesign-oss/DownloadManager"
+
 android {
     namespace = "com.markt.dlmanager"
     compileSdk = 35
@@ -12,8 +20,9 @@ android {
         applicationId = "com.markt.dlmanager"
         minSdk = 29          // Android 10+
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = ciVersionCode ?: 1
+        versionName = ciVersionName ?: "1.0"
+        buildConfigField("String", "UPDATE_URL", "\"https://github.com/$updateRepo/releases/latest/download/update.json\"")
     }
 
     // Fixed key so every build (local or GitHub Actions) can update the installed app.
@@ -47,6 +56,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     lint {
         abortOnError = false

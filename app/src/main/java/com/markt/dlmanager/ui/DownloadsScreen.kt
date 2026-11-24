@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,6 +26,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AddLink
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.BatteryAlert
@@ -50,6 +53,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -79,6 +83,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.markt.dlmanager.engine.DownloadInfo
 import com.markt.dlmanager.engine.Downloads
+import com.markt.dlmanager.engine.PendingDownload
 import com.markt.dlmanager.engine.Status
 import com.markt.dlmanager.util.Fmt
 import java.text.DateFormat
@@ -86,76 +91,104 @@ import java.util.Date
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DownloadsScreen(items: List<DownloadInfo>) {
+fun DownloadsScreen(
+    items: List<DownloadInfo>,
+    onBack: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onDownload: (PendingDownload) -> Unit,
+) {
     val context = LocalContext.current
-    var showSettings by remember { mutableStateOf(false) }
     var toDelete by remember { mutableStateOf<DownloadInfo?>(null) }
+    var addLink by remember { mutableStateOf(false) }
     var batteryOk by remember { mutableStateOf(isBatteryUnrestricted(context)) }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { batteryOk = isBatteryUnrestricted(context) }
+    BackHandler(onBack = onBack)
 
-    Column(Modifier.fillMaxSize()) {
-        TopAppBar(
-            title = { Text("Downloads") },
-            windowInsets = WindowInsets(0, 0, 0, 0),
-            actions = {
-                IconButton(onClick = { Downloads.resumeAll() }) { Icon(Icons.Filled.PlayArrow, "Resume all") }
-                IconButton(onClick = { Downloads.pauseAll() }) { Icon(Icons.Filled.Pause, "Pause all") }
-                IconButton(onClick = { showSettings = true }) { Icon(Icons.Filled.Settings, "Settings") }
-            },
-        )
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize()) {
+            TopAppBar(
+                title = { Text("Downloads") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back to browser") }
+                },
+                windowInsets = WindowInsets(0, 0, 0, 0),
+                actions = {
+                    IconButton(onClick = { Downloads.resumeAll() }) { Icon(Icons.Filled.PlayArrow, "Resume all") }
+                    IconButton(onClick = { Downloads.pauseAll() }) { Icon(Icons.Filled.Pause, "Pause all") }
+                    IconButton(onClick = onOpenSettings) { Icon(Icons.Filled.Settings, "Settings") }
+                },
+            )
 
-        if (!batteryOk) {
-            Card(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
-            ) {
-                Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Filled.BatteryAlert, null)
-                    Spacer(Modifier.width(10.dp))
+            if (!batteryOk) {
+                Card(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+                ) {
+                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.BatteryAlert, null)
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            "Allow unrestricted battery so Android doesn't stop downloads in the background.",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f),
+                        )
+                        FilledTonalButton(onClick = { requestBatteryUnrestricted(context) }) { Text("Allow") }
+                    }
+                }
+            }
+
+            if (items.isEmpty()) {
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .padding(32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Icon(Icons.Outlined.Inbox, null, Modifier.size(56.dp), tint = MaterialTheme.colorScheme.outline)
+                    Spacer(Modifier.height(8.dp))
+                    Text("No downloads yet", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "Allow unrestricted battery so Android doesn't stop downloads in the background.",
+                        "Tap Add link to paste a download link, or find files in the browser. " +
+                            "Finished files are saved in Downloads/DLManager.",
                         style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.weight(1f),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
                     )
-                    FilledTonalButton(onClick = { requestBatteryUnrestricted(context) }) { Text("Allow") }
+                }
+            } else {
+                LazyColumn(
+                    contentPadding = PaddingValues(start = 12.dp, top = 12.dp, end = 12.dp, bottom = 88.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    items(items, key = { it.id }) { d ->
+                        DownloadCard(d, onDelete = { toDelete = d })
+                    }
                 }
             }
         }
-
-        if (items.isEmpty()) {
-            Column(
-                Modifier
-                    .fillMaxSize()
-                    .padding(32.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-            ) {
-                Icon(Icons.Outlined.Inbox, null, Modifier.size(56.dp), tint = MaterialTheme.colorScheme.outline)
-                Spacer(Modifier.height(8.dp))
-                Text("No downloads yet", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "Finished files are saved in Downloads/DLManager.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                )
-            }
-        } else {
-            LazyColumn(
-                contentPadding = PaddingValues(12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                items(items, key = { it.id }) { d ->
-                    DownloadCard(d, onDelete = { toDelete = d })
-                }
-            }
-        }
+        ExtendedFloatingActionButton(
+            onClick = { addLink = true },
+            icon = { Icon(Icons.Filled.AddLink, null) },
+            text = { Text("Add link") },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(16.dp),
+        )
     }
 
-    if (showSettings) SettingsDialog(onDismiss = { showSettings = false })
     toDelete?.let { d -> DeleteDialog(d, onDismiss = { toDelete = null }) }
+    if (addLink) {
+        AddLinkDialog(
+            onDismiss = { addLink = false },
+            onConfirm = { url ->
+                addLink = false
+                onDownload(PendingDownload.fromUrl(url))
+            },
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
