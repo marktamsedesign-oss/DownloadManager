@@ -5,6 +5,13 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write   # publish the OTA release (and store the new signing key on its first run)
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -18,10 +25,61 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # Every run gets a higher versionCode, so the app can offer it as an over-the-air update.
+      - name: Set version
+        run: |
+          echo "VERSION_CODE=$((100 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=1.1.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+
+      # Signing: keystore/release.p12, encrypted with the SIGNING_PASSWORD secret.
+      # The first build on main creates it and commits it (it's useless without the password).
+      # Branch builds without the key or the secret use a throwaway key, only to check that the app builds.
       - name: Build release APK
+        env:
+          SECRET_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease --stacktrace
+          on_main=false
+          case "$GITHUB_REF" in refs/heads/main|refs/heads/master) on_main=true ;; esac
+          throwaway=false
+
+          new_key() {
+            mkdir -p "$(dirname "$1")"
+            keytool -genkeypair -noprompt -keystore "$1" -storetype PKCS12 -alias dlmanager \
+              -keyalg RSA -keysize 4096 -validity 36500 -dname "CN=DL Manager" \
+              -storepass:env SIGNING_PASSWORD -keypass:env SIGNING_PASSWORD
+          }
+
+          if [ ${#SECRET_PASSWORD} -ge 20 ]; then
+            export SIGNING_PASSWORD="$SECRET_PASSWORD"
+            export SIGNING_KEYSTORE="$PWD/keystore/release.p12"
+            if [ ! -f "$SIGNING_KEYSTORE" ]; then
+              if $on_main; then
+                new_key "$SIGNING_KEYSTORE"
+                git config user.name "github-actions[bot]"
+                git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                git add keystore/release.p12
+                git commit -m "Add release signing key (encrypted with the SIGNING_PASSWORD secret)"
+                git push origin "HEAD:$GITHUB_REF_NAME"
+              else
+                throwaway=true
+              fi
+            fi
+          elif $on_main; then
+            echo "::error title=Signing key::Add a repository secret named SIGNING_PASSWORD with at least 20 random characters (README → Signing key), then run this workflow again."
+            exit 1
+          else
+            throwaway=true
+          fi
+
+          if $throwaway; then
+            echo "::warning title=Throwaway key::This branch build is signed with a temporary key. Don't install it over a released version."
+            export SIGNING_PASSWORD="$(openssl rand -hex 24)"
+            export SIGNING_KEYSTORE="$RUNNER_TEMP/throwaway.p12"
+            new_key "$SIGNING_KEYSTORE"
+          fi
+
+          ./gradlew assembleRelease --stacktrace -PversionCode="$VERSION_CODE" -PversionName="$VERSION_NAME"
 
       - name: Rename APK
         run: cp app/build/outputs/apk/release/app-release.apk DLManager.apk
@@ -30,3 +88,28 @@ jobs:
         with:
           name: DLManager-apk
           path: DLManager.apk
+
+      # Only builds of main/master are published. The app reads update.json from the latest release.
+      - name: Publish OTA update
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${VERSION_NAME}"
+          NOTES="$(git log -1 --pretty=%s)"
+          jq -n \
+            --argjson versionCode "$VERSION_CODE" \
+            --arg versionName "$VERSION_NAME" \
+            --arg apk "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/DLManager.apk" \
+            --arg sha256 "$(sha256sum DLManager.apk | cut -d' ' -f1)" \
+            --argjson size "$(stat -c%s DLManager.apk)" \
+            --arg notes "$NOTES" \
+            '{versionCode: $versionCode, versionName: $versionName, apk: $apk, sha256: $sha256, size: $size, notes: $notes}' \
+            > update.json
+          cat update.json
+          gh release create "$TAG" DLManager.apk update.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "DL Manager ${VERSION_NAME}" \
+            --notes "$NOTES" \
+            --latest
